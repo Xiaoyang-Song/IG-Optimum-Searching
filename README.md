@@ -190,6 +190,13 @@ gradient becomes a step (implemented in `sim/ig_update.py`):
 `c = [-9,-3,3,9]` — four logistic risers separated by wide flat treads along direction
 `w=(3,1)`. Any local-gradient method landing on a tread saturates, and will saturate *again*
 on the next tread after crossing a riser — a working escape mechanism has to fire repeatedly.
+`toy_value_heatmap.png` plots the raw `f(x1,x2)` *values*, each of the five flat treads
+labeled with its value (`f≈0, 0.25, 0.5, 0.75, 1`), separated by the four sharp risers, target
+contour `f=0.85` marked in magenta, and `x^(0)` labeled with its actual value
+(`f(x^(0))=1.2e-15`) — this is
+the function itself, as distinct from `toy_heatmap_trajectories.png`'s `||grad f(x)||`
+*saturation* map below, which looks completely different (bright only exactly on the risers)
+even though it's derived from the same `f`.
 
 **8.1 — does the baseline need to *adapt*, or is *having one* enough?**
 `x^(0)` and `b^(0)` both start in the *same* dead flat zone (`u=-20` and `u=-22`) so a frozen

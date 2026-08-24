@@ -95,6 +95,7 @@ def run():
     n_kicks = sum(1 for h in hist_a1 if h.get("b_kicked"))
     print(f"[toy2d] adaptive baseline: {n_kicks} probe-kick steps")
 
+    _fig_value_heatmap(x0, b0, y_t)
     _fig_heatmap_and_trajectories(x0, b0, hist_gd, hist_fx, hist_a1)
     _fig_convergence(hist_gd, hist_fx, hist_a1)
     _fig_mechanism_multi_escape(hist_a1)
@@ -141,6 +142,56 @@ def _fig_vs_baselines(x0, y_t, project, R):
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_DIR, "toy_vs_baselines.png"), dpi=150)
+    plt.close(fig)
+
+
+def _fig_value_heatmap(x0, b0, y_t):
+    """Plain f(x1,x2) value map -- what the model actually outputs at each
+    point, as opposed to the *saturation* map (||grad f||) in the other
+    figure. Four risers (at u=-9,-3,3,9) separate FIVE flat treads (at
+    f~0, 0.25, 0.5, 0.75, 1); each tread is labeled with its value, and so
+    is the starting point x^(0)."""
+    xs1 = np.linspace(-8, 4, 320)
+    xs2 = np.linspace(-6, 4, 320)
+    X1, X2 = np.meshgrid(xs1, xs2)
+    FV = f_np(X1, X2)
+    x0n = x0.numpy()
+
+    fig, ax = plt.subplots(figsize=(7.5, 6))
+    im = ax.pcolormesh(X1, X2, FV, shading="auto", cmap="cividis", vmin=0, vmax=1)
+    fig.colorbar(im, ax=ax, label="$f(x_1,x_2)$")
+
+    riser_cs = ax.contour(X1, X2, FV, levels=[0.125, 0.375, 0.625, 0.875], colors="white",
+                           linewidths=0.9)
+    # manual label points must lie ON their line (u=3*x1+x2=const), else clabel
+    # snaps to whichever contour line is nearest -- compute them exactly.
+    ax.clabel(riser_cs, inline=True, fmt=lambda v: f"{v:.3f}", fontsize=8, colors="white",
+              manual=[(-3.0, 0.0), (-2.0, 3.0), (1.0, 0.0), (3.667, -2.0)])
+
+    target_cs = ax.contour(X1, X2, FV, levels=[y_t], colors="magenta", linewidths=2)
+    ax.clabel(target_cs, inline=True, fmt=lambda v: f"target f={v:.2f}", fontsize=9,
+              colors="magenta", manual=[(2.288, 2.0)])
+
+    # label each of the five flat treads at a representative point inside it
+    # (verified: u=3*x1+x2 must sit at the tread's center, not just past a riser)
+    tread_pts = [(-6.0, 3.0, 0.0), (-1.0, -3.0, 0.25), (1.0, -3.0, 0.5),
+                 (3.0, -3.0, 0.75), (3.5, 1.5, 1.0)]
+    for tx, ty, tv in tread_pts:
+        ax.text(tx, ty, f"f≈{tv:.2f}", color="white", fontsize=9, ha="center",
+                 bbox=dict(boxstyle="round,pad=0.2", fc="black", alpha=0.45, lw=0))
+
+    ax.scatter(*x0n, c="cyan", s=110, marker="*", zorder=5, edgecolor="k", label=r"$x^{(0)}$")
+    ax.annotate(f"$x^{{(0)}}$: $f(x^{{(0)}})$={f(x0).item():.1e}", xy=x0n,
+                xytext=(x0n[0] - 0.3, x0n[1] - 0.9), color="cyan", fontsize=9, ha="right",
+                arrowprops=dict(arrowstyle="->", color="cyan", lw=1))
+    ax.scatter(*b0.numpy(), c="orange", s=90, marker="D", zorder=5, edgecolor="k", label=r"$b^{(0)}$")
+
+    ax.set_xlabel("$x_1$")
+    ax.set_ylabel("$x_2$")
+    ax.set_title(r"$f(x_1,x_2)$ values (not saturation): 5 flat treads separated by 4 risers")
+    ax.legend(loc="lower right", fontsize=8, framealpha=0.9)
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_DIR, "toy_value_heatmap.png"), dpi=150)
     plt.close(fig)
 
 
