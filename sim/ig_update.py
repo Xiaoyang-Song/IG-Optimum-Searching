@@ -114,7 +114,7 @@ def directional_path_sensitivity(f, b: torch.Tensor, d: torch.Tensor,
 
 
 def ig_ranked_direction(f, b: torch.Tensor, ig: torch.Tensor, top_k: int,
-                         delta_b: float, M: int) -> torch.Tensor:
+                         delta_b: float, M: int, e_b: float) -> torch.Tensor:
     """
     Sec 5.1 candidate construction, simplified: rather than searching over a
     handful of separate +/-e_j / previous-direction / full-deviation
@@ -128,6 +128,13 @@ def ig_ranked_direction(f, b: torch.Tensor, ig: torch.Tensor, top_k: int,
     "overtakes" x, stalling further progress even though that direction is
     still correct. A local probe has no notion of "toward x," so it keeps
     giving the right sign regardless of where b sits relative to x.
+
+    Each coordinate's probe G_j satisfies f(b+delta_b*e_j)-f(b) = delta_b*G_j,
+    i.e. G_j alone only says which way +e_j moves f, not whether that's
+    useful -- moving f up is only progress when e_b<0 (undershooting).
+    The per-coordinate sign is therefore sign(-e_b * G_j): the sign that
+    makes that coordinate's own contribution move f toward y^t rather than
+    away from it, whichever side of the target b is currently on.
     """
     p = ig.numel()
     k = min(top_k, p)
@@ -138,7 +145,7 @@ def ig_ranked_direction(f, b: torch.Tensor, ig: torch.Tensor, top_k: int,
         e_j = torch.zeros(p)
         e_j[j] = 1.0
         Gj = directional_path_sensitivity(f, b, e_j.view_as(b), delta_b, M)
-        d[j] = ig_flat[j].item() * (1.0 if Gj >= 0 else -1.0)
+        d[j] = ig_flat[j].item() * (1.0 if (-e_b * Gj) >= 0 else -1.0)
     d = d.view_as(b)
     norm = d.norm()
     # Note: unlike a "dev"-style direction, d's raw entries are |IG_j|
@@ -166,7 +173,7 @@ def baseline_update(f, b: torch.Tensor, y_t: float, eta_b: float, tau_b: float,
     # trusted) via one more short probe before committing to the kick --
     # keeps Sec 8.4's target-improvement guarantee without searching over
     # many candidates.
-    direction = ig_ranked_direction(f, b, ig, top_k, delta_b, M)
+    direction = ig_ranked_direction(f, b, ig, top_k, delta_b, M, e_b)
     G = directional_path_sensitivity(f, b, direction, delta_b, M)
     val = e_b * G
 

@@ -135,16 +135,24 @@ before committing to it, rather than searching over and picking the best of seve
 ```
 idx      = top-k coordinates by |IG_j^(r)|
 G_j^(r)  = ∫_0^1 grad f(b^(r) + alpha * delta_b * e_j)^T e_j  d(alpha)     for j in idx
-d^(r)_j  = |IG_j^(r)| * sign(G_j^(r))      for j in idx,   0 elsewhere
+d^(r)_j  = |IG_j^(r)| * sign( -e_b^(r) * G_j^(r) )      for j in idx,   0 elsewhere
 d^(r)    = d^(r) / ||d^(r)||
 ```
 i.e. IG picks *which* top-`k` coordinates to move and how much relative weight to give each
 (`|IG_j|`), while a short local probe along each one — *not* the sign of `x_j - b_j` — picks
-*which way*. That last distinction matters: an earlier version of this used `sign(x_j-b_j)`
-(move the baseline toward `x`), which seems natural but silently breaks once the baseline
-advances past `x` along the useful direction — `x_j-b_j` flips sign there and further
-progress stalls, even though that direction is still correct. A local probe has no notion of
-"toward x," so it keeps giving the right sign regardless of where `b` sits relative to `x`.
+*which way*. Two subtleties that weren't obvious until tested:
+- An earlier version used `sign(x_j-b_j)` (move the baseline toward `x`), which seems natural
+  but silently breaks once the baseline advances past `x` along the useful direction —
+  `x_j-b_j` flips sign there and further progress stalls, even though that direction is still
+  correct. A local probe has no notion of "toward x," so it keeps giving the right sign
+  regardless of where `b` sits relative to `x`.
+- `G_j^(r)` alone only says which way `+e_j` moves `f`, not whether that's useful — moving `f`
+  up is only progress when `e_b<0` (undershooting); when the baseline has overshot (`e_b>0`)
+  the correct move is `f` *down*. The `-e_b^(r)` factor is what makes the sign choice track
+  which side of the target `b` is currently on; every experiment in this repo only ever
+  undershoots (`e_b<0` throughout), so this factor's absence was never exercised in any
+  result here — but it's necessary for the mechanism to be correct in general, e.g. Sec 8's
+  claim that the baseline is genuinely solving `f(b)≈y^t`, not just "increase f."
 The combined direction is then checked exactly like a single candidate would be,
 ```
 G^(r) = ∫_0^1 grad f(b^(r) + alpha * delta_b * d^(r))^T d^(r)  d(alpha),
