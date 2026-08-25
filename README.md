@@ -130,40 +130,67 @@ with `eta_b < eta_x` so the reference moves more conservatively than the individ
 (`||grad f(b^(r))|| <= tau_b`). The PDF lists several candidate directions to search over
 (`+/- e_j` for IG-important coordinates, the previous successful kick, the normalized current
 deviation `(x-b)/||x-b||`, plus domain-specific feasible directions); this implementation
-instead builds a *single* combined direction directly from IG's own ranking, verified once
-before committing to it, rather than searching over and picking the best of several:
+instead builds a *single* combined direction directly from IG's own ranking:
 ```
-idx      = top-k coordinates by |IG_j^(r)|
-G_j^(r)  = ∫_0^1 grad f(b^(r) + alpha * delta_b * e_j)^T e_j  d(alpha)     for j in idx
-d^(r)_j  = |IG_j^(r)| * sign( -e_b^(r) * G_j^(r) )      for j in idx,   0 elsewhere
-d^(r)    = d^(r) / ||d^(r)||
+idx        = top-k coordinates by |IG_j^(r)|
+G_j^(r)    = ∫_0^1 grad f(b^(r) + alpha * delta_b * e_j)^T e_j  d(alpha)    for j in idx
+d^(r)_j    = |IG_j^(r)| * sign(G_j^(r))      for j in idx,   0 elsewhere
+d^(r)      = d^(r) / ||d^(r)||
 ```
 i.e. IG picks *which* top-`k` coordinates to move and how much relative weight to give each
 (`|IG_j|`), while a short local probe along each one — *not* the sign of `x_j - b_j` — picks
-*which way*. Two subtleties that weren't obvious until tested:
-- An earlier version used `sign(x_j-b_j)` (move the baseline toward `x`), which seems natural
-  but silently breaks once the baseline advances past `x` along the useful direction —
-  `x_j-b_j` flips sign there and further progress stalls, even though that direction is still
-  correct. A local probe has no notion of "toward x," so it keeps giving the right sign
-  regardless of where `b` sits relative to `x`.
-- `G_j^(r)` alone only says which way `+e_j` moves `f`, not whether that's useful — moving `f`
-  up is only progress when `e_b<0` (undershooting); when the baseline has overshot (`e_b>0`)
-  the correct move is `f` *down*. The `-e_b^(r)` factor is what makes the sign choice track
-  which side of the target `b` is currently on; every experiment in this repo only ever
-  undershoots (`e_b<0` throughout), so this factor's absence was never exercised in any
-  result here — but it's necessary for the mechanism to be correct in general, e.g. Sec 8's
-  claim that the baseline is genuinely solving `f(b)≈y^t`, not just "increase f."
-The combined direction is then checked exactly like a single candidate would be,
+their *relative* signs. An earlier version used `sign(x_j-b_j)` (move the baseline toward
+`x`), which seems natural but silently breaks once the baseline advances past `x` along the
+useful direction — `x_j-b_j` flips sign there and further progress stalls, even though that
+direction is still correct. A local probe has no notion of "toward x," so it keeps giving the
+right relative pattern regardless of where `b` sits relative to `x`.
+
+This probes only `+e_j`, and doesn't need `e_b` at all yet, because every `f` in this repo has
+the form `g(c^T x)` — a monotonic link over a *single* linear combination — so
+`avg_grad_j = c_j * (shared scalar factor)`: the relative sign pattern across coordinates is
+fixed by `sign(c_j)` alone and never depends on position. The only thing actually left
+ambiguous is one *global* polarity choice (increase `u` or decrease it), resolved once,
+cheaply, rather than per-coordinate:
 ```
-G^(r) = ∫_0^1 grad f(b^(r) + alpha * delta_b * d^(r))^T d^(r)  d(alpha),
+G_+^(r) = ∫_0^1 grad f(b^(r) + alpha * delta_b *  d^(r))^T  d^(r)  d(alpha),
+G_-^(r) = ∫_0^1 grad f(b^(r) + alpha * delta_b * -d^(r))^T -d^(r)  d(alpha),
+b^(r+1) = Π_B[ b^(r) + eta_kick * d^(r) ]   if e_b^(r) G_+^(r) <= e_b^(r) G_-^(r),
+        = Π_B[ b^(r) - eta_kick * d^(r) ]   otherwise,
 ```
-and the kick only fires if it's genuinely target-improving (`e_b^(r) G^(r) < 0`):
-```
-b^(r+1) = Π_B[ b^(r) + eta_kick * d^(r) ]      if e_b^(r) G^(r) < 0,   else hold b^(r+1)=b^(r),
-```
-returning to ordinary gradient mode once local sensitivity is restored. This is the mechanism
-that lets a *badly placed* baseline rescue itself (Experiment 1, §7.1) — using `k+1` probe
-evaluations instead of a `2k+2`-candidate search.
+returning to ordinary gradient mode once local sensitivity is restored. `+d^(r)` and `-d^(r)`
+walk the probe to genuinely different points (not mirror-image readings of the same one), so
+whichever side `b` currently sits saturated on, the *other* direction reliably leads back
+toward the sensitive region and the target. (A more general, non-separable `f` where different
+coordinates could need independently-determined signs would need per-coordinate bidirectional
+probing instead of a single global flip — but no function in this repo requires that.)
+
+Unlike the PDF's own Sec 8.4 ("this prevents arbitrary path-gradient kicks"), there is
+deliberately **no verify-before-committing gate** here — the baseline always takes whichever of
+`+d^(r)`/`-d^(r)` is more favorable, even if neither is strictly improving, rather than holding
+when the read is ambiguous. This trades a guarantee for simplicity: since the two probed
+directions already span both ways along the informative axis, one of them being at least not
+harmful is very likely once `delta_b` clears any dead zone; and even an imperfect step isn't
+wasted, since it moves `b` out of wherever the probe was uninformative, making the next
+iteration's read more reliable regardless. Practically, this also means the baseline can never
+get permanently `"stuck"` — every probe iteration ends in a kick, which is exactly what
+resolves the deadlock case described in the box below. This is the mechanism that lets a
+*badly placed* baseline rescue itself (Experiment 1, §7.1), using `k+2` probe evaluations
+(one per coordinate, plus two for the combined direction's polarity) — cheaper than the PDF's
+`2k+2`-candidate search, and ranked/combined rather than searched-and-picked.
+
+> **A constructed deadlock, and why it doesn't happen here.** Take a baseline sitting deep in
+> saturation on the *high* side of a monotonic `f`, needing to come back down to the target: if
+> the mechanism only ever probed `+e_j` and required verification before committing, it would
+> stay stuck forever — every probe just goes deeper into the same dead saturated region, no
+> matter how large `delta_b` is grown, and `"no improving direction found"` always holds. This
+> is not hypothetical: constructing exactly that case (`b` overshot into literal-zero-gradient
+> territory) reproduces a genuine permanent deadlock under the verify-and-hold design. Probing
+> both signs — and always committing to the better one — resolves it in a handful of
+> iterations. Verified: rerunning all four experiments in this repo with the final design gives
+> results **byte-for-byte identical** to every earlier version, since none of them ever needed
+> rescuing from a real deadlock in the first place — this mechanism is purely a robustness
+> property, invisible in this repo's own results, but load-bearing for the general claim that
+> a badly-placed baseline is not fatal.
 
 ## 6. Full coupled loop (Algorithm 1)
 

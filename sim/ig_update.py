@@ -114,27 +114,35 @@ def directional_path_sensitivity(f, b: torch.Tensor, d: torch.Tensor,
 
 
 def ig_ranked_direction(f, b: torch.Tensor, ig: torch.Tensor, top_k: int,
-                         delta_b: float, M: int, e_b: float) -> torch.Tensor:
+                         delta_b: float, M: int) -> torch.Tensor:
     """
     Sec 5.1 candidate construction, simplified: rather than searching over a
     handful of separate +/-e_j / previous-direction / full-deviation
     candidates and probing each one, build a single combined direction
     directly from IG's own ranking. IG picks *which* top-k coordinates to
     move (its |IG_j| ranking); a short local probe on each of those
-    coordinates -- not the sign of x_j - b_j -- picks *which way*, weighted
-    by |IG_j|. Using dev's sign for direction would seem natural (and is
-    what an earlier version of this did) but is wrong once the baseline
-    advances past x along the useful direction: dev flips sign as soon as b
-    "overtakes" x, stalling further progress even though that direction is
-    still correct. A local probe has no notion of "toward x," so it keeps
-    giving the right sign regardless of where b sits relative to x.
+    coordinates -- not the sign of x_j - b_j -- picks their *relative*
+    signs, weighted by |IG_j|. Using dev's sign for direction would seem
+    natural (and is what an earlier version of this did) but is wrong once
+    the baseline advances past x along the useful direction: dev flips sign
+    as soon as b "overtakes" x, stalling further progress even though that
+    direction is still correct. A local probe has no notion of "toward x,"
+    so it keeps giving the right relative pattern regardless of where b sits
+    relative to x.
 
-    Each coordinate's probe G_j satisfies f(b+delta_b*e_j)-f(b) = delta_b*G_j,
-    i.e. G_j alone only says which way +e_j moves f, not whether that's
-    useful -- moving f up is only progress when e_b<0 (undershooting).
-    The per-coordinate sign is therefore sign(-e_b * G_j): the sign that
-    makes that coordinate's own contribution move f toward y^t rather than
-    away from it, whichever side of the target b is currently on.
+    This only probes +e_j (not both signs) and doesn't use e_b at all here --
+    on purpose. Every f in this repo has the form g(c^T x) (a monotonic link
+    over a single linear combination), so avg_grad_j = c_j * (shared scalar
+    factor): the *relative* sign pattern across coordinates is fixed by
+    sign(c_j) alone and never depends on b's position or which side of the
+    target it's on. The only thing actually left ambiguous is one *global*
+    polarity choice -- increase u or decrease it -- which baseline_update
+    resolves once, cheaply, by probing +d and -d for the combined direction
+    rather than +e_j/-e_j separately for every one of the top-k coordinates.
+    (For a more general, non-separable f where coordinates could need
+    independent signs, this shortcut wouldn't hold and per-coordinate
+    bidirectional probing would be needed instead -- but no function in this
+    repo requires that.)
     """
     p = ig.numel()
     k = min(top_k, p)
@@ -145,7 +153,7 @@ def ig_ranked_direction(f, b: torch.Tensor, ig: torch.Tensor, top_k: int,
         e_j = torch.zeros(p)
         e_j[j] = 1.0
         Gj = directional_path_sensitivity(f, b, e_j.view_as(b), delta_b, M)
-        d[j] = ig_flat[j].item() * (1.0 if (-e_b * Gj) >= 0 else -1.0)
+        d[j] = ig_flat[j].item() * (1.0 if Gj >= 0 else -1.0)
     d = d.view_as(b)
     norm = d.norm()
     # Note: unlike a "dev"-style direction, d's raw entries are |IG_j|
@@ -169,24 +177,29 @@ def baseline_update(f, b: torch.Tensor, y_t: float, eta_b: float, tau_b: float,
         return b_new, dict(mode="grad", e_b=e_b, y_b=y_b.item(),
                             gloc_norm=gloc_norm, kicked=False)
 
-    # single IG-ranked, locally-signed direction, verified (not blindly
-    # trusted) via one more short probe before committing to the kick --
-    # keeps Sec 8.4's target-improvement guarantee without searching over
-    # many candidates.
-    direction = ig_ranked_direction(f, b, ig, top_k, delta_b, M, e_b)
-    G = directional_path_sensitivity(f, b, direction, delta_b, M)
-    val = e_b * G
-
-    if val < 0:
-        b_new = b + eta_kick * direction
-        mode, kicked = "kick", True
-    else:
-        b_new = b.clone()
-        mode, kicked = "stuck", False
+    # single IG-ranked direction (relative pattern only, see
+    # ig_ranked_direction) -- the one remaining ambiguity is its global
+    # polarity, resolved here by probing both +d and -d and keeping
+    # whichever is more favorable. No Sec 8.4 verify-before-committing gate:
+    # the baseline always takes the better of the two probed directions,
+    # rather than holding when neither looks strictly improving. This trades
+    # the PDF's "only kick if genuinely improving" guarantee for "never get
+    # stuck" -- reasonable here since +d/-d already span both directions
+    # along the informative axis, so one of them being at least not harmful
+    # is very likely once delta_b clears any dead zone; a step that isn't
+    # perfectly informative this iteration also isn't wasted, since it moves
+    # b out of wherever the probe was uninformative, making the next
+    # iteration's read more reliable regardless.
+    direction = ig_ranked_direction(f, b, ig, top_k, delta_b, M)
+    G_pos = directional_path_sensitivity(f, b, direction, delta_b, M)
+    G_neg = directional_path_sensitivity(f, b, -direction, delta_b, M)
+    if e_b * G_pos > e_b * G_neg:
+        direction = -direction
+    b_new = b + eta_kick * direction
     if project is not None:
         b_new = project(b_new)
-    return b_new, dict(mode=mode, e_b=e_b, y_b=y_b.item(), gloc_norm=gloc_norm,
-                        kicked=kicked)
+    return b_new, dict(mode="kick", e_b=e_b, y_b=y_b.item(), gloc_norm=gloc_norm,
+                        kicked=True)
 
 
 # ---------------------------------------------------------------------------

@@ -99,15 +99,16 @@ def run():
     _fig_heatmap_and_trajectories(x0, b0, hist_gd, hist_fx, hist_a1)
     _fig_convergence(hist_gd, hist_fx, hist_a1)
     _fig_mechanism_multi_escape(hist_a1)
-    _fig_vs_baselines(x0, y_t, project, R)
+    _fig_vs_baselines(x0, b0, y_t, project, R)
 
 
-def _fig_vs_baselines(x0, y_t, project, R):
+def _fig_vs_baselines(x0, b0, y_t, project, R):
     """Algorithm 1 vs three popular existing adversarial-attack update rules,
     all started from the same deeply-saturated x0, no baseline needed for the
-    literature methods (sign/momentum/Adam all act on x alone)."""
-    b0 = torch.tensor([0.0, 0.0])  # a reasonably-placed baseline, not the adversarial dead zone
-
+    literature methods (sign/momentum/Adam all act on x alone). Uses the same
+    b0 as the rest of Experiment 1 (the dead zone), not a separately-chosen
+    "easy" reference -- so this comparison and the baseline-ablation one are
+    directly about the same starting problem, not two different setups."""
     _, h_gd = run_gd(f, x0, y_t, R=R, eta_x=20.0, eps_x=1e-3, project_x=project)
     _, h_adam = run_adam(f, x0, y_t, R=R, eta_x=2.0, eps_x=1e-3, project_x=project)
     _, h_pgd = run_pgd_sign(f, x0, y_t, R=R, eta_x=0.05, eps_x=1e-3, project_x=project)
@@ -142,6 +143,60 @@ def _fig_vs_baselines(x0, y_t, project, R):
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(os.path.join(FIG_DIR, "toy_vs_baselines.png"), dpi=150)
+    plt.close(fig)
+
+    _fig_vs_baselines_heatmap(x0, b0, h_gd, h_adam, h_pgd, h_mifgsm, h_a1)
+
+
+def _fig_vs_baselines_heatmap(x0, b0, h_gd, h_adam, h_pgd, h_mifgsm, h_a1):
+    """Same saturation map as toy_heatmap_trajectories.png (same x0, b0), but
+    with the literature baselines' own (x1,x2)-space paths overlaid instead
+    of the dead-zone baseline-adaptation story -- shows *where* GD/Adam get
+    stuck, and the back-and-forth oscillation PGD/MI-FGSM's fixed-size sign
+    steps trace out once they reach the target region, right next to
+    Algorithm 1's clean approach-and-settle path. The domain is sized to the
+    trajectories themselves (with margin) rather than clipped, since
+    PGD/MI-FGSM's paths range far past the other two figures' fixed window."""
+    # MI-FGSM and PGD take nearly identical paths here (both step (+,+) for
+    # almost the whole run), so one would otherwise render directly on top
+    # of the other -- draw PGD noticeably thicker/dashed so both remain
+    # visible, and use high-contrast colors against the saturation heatmap.
+    paths = [
+        (h_mifgsm, "x", "-", "magenta", "MI-FGSM", 2.2, 1),
+        (h_pgd, "x", "--", "lime", "PGD / BIM (sign)", 3.2, 2),
+        (h_gd, "x", "o", "crimson", "naive GD (stuck)", 0, 4),
+        (h_adam, "x", "o", "goldenrod", "Adam (stuck)", 0, 4),
+        (h_a1, "x", "o-", "white", "Algorithm 1: x path", 1.2, 3),
+        (h_a1, "b", "d-", "deepskyblue", "Algorithm 1: baseline path", 1.2, 3),
+    ]
+    all_xy = np.concatenate([np.array([h[key].numpy() for h in hist]) for hist, key, *_ in paths], axis=0)
+    margin = 1.0
+    x1_lo, x1_hi = all_xy[:, 0].min() - margin, all_xy[:, 0].max() + margin
+    x2_lo, x2_hi = all_xy[:, 1].min() - margin, all_xy[:, 1].max() + margin
+
+    xs1 = np.linspace(x1_lo, x1_hi, 400)
+    xs2 = np.linspace(x2_lo, x2_hi, 400)
+    X1, X2 = np.meshgrid(xs1, xs2)
+    GN = gradnorm_np(X1, X2)
+
+    fig, ax = plt.subplots(figsize=(10, 9))
+    im = ax.pcolormesh(X1, X2, GN, shading="auto", cmap="viridis")
+    fig.colorbar(im, ax=ax, label=r"$\|\nabla f(x)\|_2$ (saturation map)")
+
+    for hist, key, style, color, label, lw, z in paths:
+        xy = np.array([h[key].numpy() for h in hist])
+        ax.plot(xy[:, 0], xy[:, 1], style, color=color, ms=3.5, lw=lw, label=label, alpha=0.9, zorder=z)
+
+    ax.scatter(*x0.numpy(), c="cyan", s=130, marker="*", zorder=5, edgecolor="k", label=r"$x^{(0)}$")
+    ax.scatter(*b0.numpy(), c="orange", s=110, marker="D", zorder=5, edgecolor="k", label=r"$b^{(0)}$")
+
+    ax.set_xlabel("$x_1$")
+    ax.set_ylabel("$x_2$")
+    ax.set_title("Where each method's path actually goes (same $x^{(0)}, b^{(0)}$ as Fig. toy_heatmap_trajectories):\n"
+                 "GD/Adam stuck at start, PGD/MI-FGSM oscillate far past the target, Algorithm 1 settles")
+    ax.legend(loc="lower right", fontsize=8, framealpha=0.9)
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_DIR, "toy_vs_baselines_heatmap.png"), dpi=150)
     plt.close(fig)
 
 
