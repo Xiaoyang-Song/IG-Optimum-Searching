@@ -127,19 +127,35 @@ b^(r+1) = Π_B[ b^(r) - eta_b * e_b^(r) * grad f(b^(r)) ],      ||grad f(b^(r))|
 with `eta_b < eta_x` so the reference moves more conservatively than the individual input.
 
 **Directional path probing** (Sec 5.1) fires when the baseline is *itself* saturated
-(`||grad f(b^(r))|| <= tau_b`). For candidate unit directions `d_k` (here: `+/- e_j` for the
-top-`k` IG-important coordinates, the previous successful kick direction, and the normalized
-current deviation `(x-b)/||x-b||`), define the directional path sensitivity
+(`||grad f(b^(r))|| <= tau_b`). The PDF lists several candidate directions to search over
+(`+/- e_j` for IG-important coordinates, the previous successful kick, the normalized current
+deviation `(x-b)/||x-b||`, plus domain-specific feasible directions); this implementation
+instead builds a *single* combined direction directly from IG's own ranking, verified once
+before committing to it, rather than searching over and picking the best of several:
 ```
-G_k^(r) = ∫_0^1 grad f(b^(r) + alpha * delta_b * d_k)^T d_k  d(alpha)
+idx      = top-k coordinates by |IG_j^(r)|
+G_j^(r)  = ∫_0^1 grad f(b^(r) + alpha * delta_b * e_j)^T e_j  d(alpha)     for j in idx
+d^(r)_j  = |IG_j^(r)| * sign(G_j^(r))      for j in idx,   0 elsewhere
+d^(r)    = d^(r) / ||d^(r)||
 ```
-so that `f(b + delta_b d_k) - f(b) = delta_b G_k^(r)` exactly. A direction is
-target-improving iff `e_b^(r) G_k^(r) < 0`; the algorithm takes the best such kick,
+i.e. IG picks *which* top-`k` coordinates to move and how much relative weight to give each
+(`|IG_j|`), while a short local probe along each one — *not* the sign of `x_j - b_j` — picks
+*which way*. That last distinction matters: an earlier version of this used `sign(x_j-b_j)`
+(move the baseline toward `x`), which seems natural but silently breaks once the baseline
+advances past `x` along the useful direction — `x_j-b_j` flips sign there and further
+progress stalls, even though that direction is still correct. A local probe has no notion of
+"toward x," so it keeps giving the right sign regardless of where `b` sits relative to `x`.
+The combined direction is then checked exactly like a single candidate would be,
 ```
-b^(r+1) = Π_B[ b^(r) + eta_kick * d_{k*}^(r) ],      k* = argmin_k e_b^(r) G_k^(r),
+G^(r) = ∫_0^1 grad f(b^(r) + alpha * delta_b * d^(r))^T d^(r)  d(alpha),
 ```
-and returns to ordinary gradient mode once local sensitivity is restored. This is the
-mechanism that lets a *badly placed* baseline rescue itself (Experiment 1, §7.1).
+and the kick only fires if it's genuinely target-improving (`e_b^(r) G^(r) < 0`):
+```
+b^(r+1) = Π_B[ b^(r) + eta_kick * d^(r) ]      if e_b^(r) G^(r) < 0,   else hold b^(r+1)=b^(r),
+```
+returning to ordinary gradient mode once local sensitivity is restored. This is the mechanism
+that lets a *badly placed* baseline rescue itself (Experiment 1, §7.1) — using `k+1` probe
+evaluations instead of a `2k+2`-candidate search.
 
 ## 6. Full coupled loop (Algorithm 1)
 
@@ -154,7 +170,7 @@ for r = 0 .. R-1:
     x^(r+1) <- Π_X[x^(r) - eta_x e_x W_IG g_x]
     g_loc,b <- grad f(b^(r))
     if ||g_loc,b|| > tau_b:  b^(r+1) <- Π_B[b^(r) - eta_b e_b g_loc,b]
-    else: directional-probe kick (Sec 5.1), or hold b^(r+1) = b^(r) if no candidate helps
+    else: IG-ranked directional-probe kick (Sec 5.1), or hold b^(r+1) = b^(r) if not improving
 return x^(R), b^(R)
 ```
 Implemented verbatim in [`sim/ig_update.py`](sim/ig_update.py) as `run_algorithm1`, generic

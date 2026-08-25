@@ -113,32 +113,44 @@ def directional_path_sensitivity(f, b: torch.Tensor, d: torch.Tensor,
     return total / M
 
 
-def build_baseline_candidates(x: torch.Tensor, b: torch.Tensor, ig: torch.Tensor,
-                               top_k: int = 5, prev_dir: torch.Tensor | None = None):
+def ig_ranked_direction(f, b: torch.Tensor, ig: torch.Tensor, top_k: int,
+                         delta_b: float, M: int) -> torch.Tensor:
     """
-    Candidate directions per Sec 5.1: +/- e_j for IG-important coordinates,
-    the previous successful baseline direction, and the normalized current
-    deviation (x - b) as an optional probe.
+    Sec 5.1 candidate construction, simplified: rather than searching over a
+    handful of separate +/-e_j / previous-direction / full-deviation
+    candidates and probing each one, build a single combined direction
+    directly from IG's own ranking. IG picks *which* top-k coordinates to
+    move (its |IG_j| ranking); a short local probe on each of those
+    coordinates -- not the sign of x_j - b_j -- picks *which way*, weighted
+    by |IG_j|. Using dev's sign for direction would seem natural (and is
+    what an earlier version of this did) but is wrong once the baseline
+    advances past x along the useful direction: dev flips sign as soon as b
+    "overtakes" x, stalling further progress even though that direction is
+    still correct. A local probe has no notion of "toward x," so it keeps
+    giving the right sign regardless of where b sits relative to x.
     """
-    cands = {}
-    top = torch.topk(ig.abs().flatten(), k=min(top_k, ig.numel())).indices
-    for j in top.tolist():
-        e_j = torch.zeros_like(b).flatten()
+    p = ig.numel()
+    k = min(top_k, p)
+    ig_flat = ig.abs().flatten()
+    idx = torch.topk(ig_flat, k=k).indices
+    d = torch.zeros(p)
+    for j in idx.tolist():
+        e_j = torch.zeros(p)
         e_j[j] = 1.0
-        e_j = e_j.view_as(b)
-        cands[f"+e{j}"] = e_j
-        cands[f"-e{j}"] = -e_j
-    if prev_dir is not None:
-        cands["prev"] = prev_dir
-    dev = x - b
-    if dev.norm().item() > 1e-8:
-        cands["dev"] = dev / dev.norm()
-    return cands
+        Gj = directional_path_sensitivity(f, b, e_j.view_as(b), delta_b, M)
+        d[j] = ig_flat[j].item() * (1.0 if Gj >= 0 else -1.0)
+    d = d.view_as(b)
+    norm = d.norm()
+    # Note: unlike a "dev"-style direction, d's raw entries are |IG_j|
+    # magnitudes, which are legitimately tiny (down to ~1e-16) deep in
+    # saturation -- normalize whenever there's any signal at all (norm>0),
+    # not just when it clears an absolute-scale threshold like 1e-8.
+    return d / norm if norm.item() > 0.0 else d
 
 
 def baseline_update(f, b: torch.Tensor, y_t: float, eta_b: float, tau_b: float,
-                     eta_kick: float, candidates: dict, delta_b: float = 0.1,
-                     M: int = 10, project=None):
+                     eta_kick: float, ig: torch.Tensor, top_k: int,
+                     delta_b: float = 0.1, M: int = 10, project=None):
     g_loc, y_b = grad_and_value(f, b)
     e_b = (y_b - y_t).item()
     gloc_norm = g_loc.norm().item()
@@ -148,18 +160,18 @@ def baseline_update(f, b: torch.Tensor, y_t: float, eta_b: float, tau_b: float,
         if project is not None:
             b_new = project(b_new)
         return b_new, dict(mode="grad", e_b=e_b, y_b=y_b.item(),
-                            gloc_norm=gloc_norm, kicked=False, kick_dir=None)
+                            gloc_norm=gloc_norm, kicked=False)
 
-    best_name, best_val, best_d = None, None, None
-    for name, d in candidates.items():
-        dn = d / (d.norm() + 1e-12)
-        G = directional_path_sensitivity(f, b, dn, delta_b, M)
-        val = e_b * G
-        if best_val is None or val < best_val:
-            best_val, best_name, best_d = val, name, dn
+    # single IG-ranked, locally-signed direction, verified (not blindly
+    # trusted) via one more short probe before committing to the kick --
+    # keeps Sec 8.4's target-improvement guarantee without searching over
+    # many candidates.
+    direction = ig_ranked_direction(f, b, ig, top_k, delta_b, M)
+    G = directional_path_sensitivity(f, b, direction, delta_b, M)
+    val = e_b * G
 
-    if best_val is not None and best_val < 0:
-        b_new = b + eta_kick * best_d
+    if val < 0:
+        b_new = b + eta_kick * direction
         mode, kicked = "kick", True
     else:
         b_new = b.clone()
@@ -167,8 +179,7 @@ def baseline_update(f, b: torch.Tensor, y_t: float, eta_b: float, tau_b: float,
     if project is not None:
         b_new = project(b_new)
     return b_new, dict(mode=mode, e_b=e_b, y_b=y_b.item(), gloc_norm=gloc_norm,
-                        kicked=kicked, kick_dir=best_name if kicked else None,
-                        kick_dir_tensor=best_d if kicked else None)
+                        kicked=kicked)
 
 
 # ---------------------------------------------------------------------------
@@ -192,13 +203,11 @@ def run_algorithm1(f, x0: torch.Tensor, b0: torch.Tensor, y_t: float, R: int,
     """
     x, b = x0.clone(), b0.clone()
     history = []
-    prev_dir = None
     for r in range(R):
         vx, vinfo = vehicle_update(f, x, b, y_t, eta_x, tau_x, M, project_x, use_ig_weights)
         if not adapt_baseline:
             vb, binfo = b.clone(), dict(mode="frozen", e_b=(f(b).item() - y_t),
-                                         y_b=f(b).item(), gloc_norm=0.0, kicked=False,
-                                         kick_dir=None)
+                                         y_b=f(b).item(), gloc_norm=0.0, kicked=False)
             history.append(dict(r=r, x=x.clone(), b=b.clone(),
                                  **{f"x_{k}": v for k, v in vinfo.items()},
                                  **{f"b_{k}": v for k, v in binfo.items()}))
@@ -206,11 +215,8 @@ def run_algorithm1(f, x0: torch.Tensor, b0: torch.Tensor, y_t: float, R: int,
             if abs(vinfo["e_x"]) <= eps_x:
                 break
             continue
-        cands = build_baseline_candidates(x, b, vinfo["ig"], top_k, prev_dir)
-        vb, binfo = baseline_update(f, b, y_t, eta_b, tau_b, eta_kick, cands,
+        vb, binfo = baseline_update(f, b, y_t, eta_b, tau_b, eta_kick, vinfo["ig"], top_k,
                                      delta_b, max(M // 2, 5), project_b)
-        if binfo.get("kicked"):
-            prev_dir = binfo["kick_dir_tensor"]
         rec = dict(r=r, x=x.clone(), b=b.clone(), **{f"x_{k}": v for k, v in vinfo.items()},
                    **{f"b_{k}": v for k, v in binfo.items()})
         history.append(rec)
