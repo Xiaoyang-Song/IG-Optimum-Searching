@@ -268,25 +268,33 @@ vehicle's gate `s_x^(r)` — it does **not** switch once and settle: it spikes b
 (re-saturates) three more times as `x` lands on each subsequent tread, each aligned with a
 fresh cluster of baseline probe-kicks (magenta bands) — 7 gate crossings of 0.5 total.
 
-**8.2 — vs. the literature baselines** (`toy_vs_baselines.png`, well-placed `b^(0)=(0,0)`,
-same deeply-saturated `x^(0)`, R=300):
+**8.2 — vs. the literature baselines** (`toy_vs_baselines.png`, `toy_vs_baselines_heatmap.png`
+— same `x^(0)`, `b^(0)` as §8.1's dead zone, not a separately-chosen easier reference, R=300):
 
 | method | converges to `eps_x=1e-3`? | tail-window `\|e_x\|` |
 |---|---|---|
 | GD | no | 0.850 (never moves) |
 | Adam | no | 0.850 (never moves) |
 | PGD/BIM | no | oscillates in `[0.011, 0.025]` |
-| MI-FGSM | no | oscillates, up to `0.15` |
-| **Algorithm 1** | **yes, 133 iters** | `~3e-7` |
+| MI-FGSM | no | oscillates in `[0.011, 0.092]` |
+| **Algorithm 1** | **yes, 159 iters** | `~0` |
 
 This is the clean version of the finding that recurs throughout: **sign-based methods do
 partially solve saturation** (by discarding gradient magnitude, they escape flat regions that
 plain GD/Adam cannot) **but never settle precisely** — their step size is constant regardless
-of proximity to the target, so once near `y^t` they oscillate indefinitely. Algorithm 1's step
+of proximity to the target, so once near `y^t` they oscillate indefinitely (`toy_vs_baselines.png`
+shows this as a persistent sawtooth that never dips below the `eps_x` line). Algorithm 1's step
 magnitude is `eta_x * e_x * ...`, which shrinks to zero as `e_x -> 0`, so it both escapes *and*
 converges. Adam is stuck for a different, interesting reason: with gradient magnitude
 `~1e-13`, its denominator `sqrt(v_hat) + eps` (`eps=1e-8`) is dominated by `eps`, suppressing
-any step regardless of the learning rate.
+any step regardless of the learning rate. `toy_vs_baselines_heatmap.png` shows where each
+method's path actually goes in `(x1,x2)` space (domain sized to the trajectories, not
+clipped): PGD and MI-FGSM turn out to trace nearly identical diagonal paths (both step
+`(+,+)` almost every iteration until very close to the target), traveling far past all four
+risers before their small-amplitude oscillation becomes visible — at this trajectory's scale
+that oscillation is a barely-perceptible wiggle right at the tip of a long, otherwise-straight
+line, which is why the effect is much clearer in the error-vs-iteration plot than in `(x1,x2)`
+space.
 
 ## 9. Experiment 2 — MNIST target-confidence "attack" (`sim/mnist_exp.py`)
 
