@@ -18,7 +18,8 @@ sim/
   toy2d.py               Experiment 1: 2D synthetic staircase-saturation problem
   mnist_exp.py            Experiment 2: MNIST target-confidence "attack"
   ig_attribution_exp.py    Experiment 3: does IG attribution match ground-truth importance?
-  run_all.py                runs all three experiments, writes sim/figures/*.png
+  budget_exp.py             Experiment 4: escape + attribution under a scarce movement budget
+  run_all.py                 runs all four experiments, writes sim/figures/*.png
 ```
 
 Run everything with:
@@ -323,16 +324,102 @@ concentrating movement onto the coordinates domain knowledge says matter, conver
 the process. `attr_weight_evolution.png` shows `W_IG` staying stably split (~2.8 vs ~0.06 per
 group) across the run.
 
-## 11. Reproducing
+## 11. Experiment 4 — budget-constrained attribution-aware escape (`sim/budget_exp.py`)
+
+Escaping saturation is not the whole story if movement itself is *scarce*. Real UFK/process
+adjustments (and sparse-perturbation attacks) rarely allow moving every coordinate freely —
+there's usually a bounded total adjustment budget shared across all of them. This experiment
+adds that constraint on top of saturation and asks two questions the earlier experiments don't:
+which methods can escape a truly dead gradient *at all*, and among the ones that can, which
+ones spend a scarce shared budget on the coordinates that matter?
+
+`f(x) = sigmoid(c^T x)`, `x in R^12`, 3 "important" coordinates (`c_j=6.0`) and 9 "decoy"
+coordinates (`c_j=0.1`) — more decoys than the 6-D attribution experiment, so "spend the
+budget on what matters" is a sharper test. `x^(0) = -3` in every coordinate: `f(x^(0))`
+**underflows to `2.4e-25`**, and the individual gradient components are tiny but not literally
+zero (`~1.4e-24` on the important coordinates, `~2.4e-26` on the decoys, all same sign) — it's
+`‖grad f(x^(0))‖` that reads as exactly `0.0`, because computing the L2 norm *squares* each
+component first, and e.g. `(1.4e-24)² ≈ 2e-48` underflows float32 even though the component
+itself doesn't. This distinction matters: `eta·e_x·grad` (naive GD's step) is proportional to
+that ~`1e-24` magnitude and rounds back to `x^(0)` exactly no matter how large `eta` is made —
+the step is below float32's representable increment at `x`'s scale. `sign(grad)` (PGD's step),
+by contrast, is perfectly well-defined regardless of how small the true magnitude is, which is
+exactly why sign-based methods behave completely differently below. `b^(0) = 0` (the sensitive
+point). `y^t = 0.9`.
+
+The movement budget imitates a real resource constraint as a shared **L1 cap on the vehicle's
+total perturbation** (the baseline is not budget-limited — it's an internal reference, not a
+real object being changed): `Π_budget(x) = x^(0) + rescale(x - x^(0))` so that
+`||x-x^(0)||_1 ≤ B`, i.e. once accumulated perturbation would exceed the budget, it's rescaled
+down (direction preserved) rather than let through.
+
+**The objective is landing on `y^t`, not maximizing `f(x)`** — overshooting past the target is
+just as much a failure as undershooting. Every figure and number below therefore reports the
+*deviation* `|f(x)-y^t|` (lower is better, `0` = exactly on target), not the raw value.
+(An earlier version of this experiment used `eta_x=5.0` for Algorithm 1, which was aggressive
+enough that at generous budgets the vehicle's single path-gradient-driven step could jump clean
+across the entire sensitive region in one iteration and land deep in saturation on the *other*
+side — `f` pinned at exactly `1.0`, deviation `0.1`, not actually converged, just saturated the
+other way. Dropping to `eta_x=2.0` removes this: every reported Algorithm-1 run below
+early-stops cleanly on the paper's own `|e_x|<=eps_x` criterion rather than exhausting the full
+iteration budget while stuck at an overshot extreme.)
+
+**At a tight budget `B=10`** (`budget_bar_final_f.png`, `budget_concentration.png`):
+
+| method | `f(x)` reached | deviation `\|f-y^t\|` | outcome | % of movement spent on the 3 important coords |
+|---|---|---|---|---|
+| naive GD | 0.000 | 0.900 | never moves — grad is unrepresentably tiny | 0% (no movement at all) |
+| Adam | 0.000 | 0.900 | same — `eps` dominates a near-zero numerator | 0% (no movement at all) |
+| PGD / BIM | 0.000 | 0.900 | escapes deep saturation in principle (sign step ignores magnitude), but this budget is too small even for that | **25%** (=3/12, exactly uniform) |
+| MI-FGSM | 0.000 | 0.900 | same | **25%** (exactly uniform) |
+| Algorithm 1, no IG weights | 0.620 | 0.280 | escapes, not nearly enough | 95% |
+| **Algorithm 1 (IG-guided)** | **0.900** | **0.0003** | **lands on target** | **98%** |
+
+PGD and MI-FGSM's sign-based step is *by construction* the same magnitude on every coordinate
+regardless of importance — so under a shared budget they spend **exactly 25% (3/12) on the
+important coordinates**, precisely the uniform allocation their mechanism guarantees, and
+waste the rest. GD and Adam do not move a single step (0% of nothing), confirming the local
+gradient there is not merely small but too many orders of magnitude below float32 precision to
+register as a step. The no-IG-weights ablation already does much better (95%) than the sign
+methods, because — as in Experiment 3 — the raw path-gradient direction is naturally somewhat
+proportional to `c_j`, but that's still not nearly enough to close the gap at this budget
+(deviation `0.280`, 28x the tolerance); the extra IG-derived weighting is what gets deviation
+down to `0.0003`.
+
+**Sweeping the budget** from 8 to 60 (`budget_sweep.png`, log-log, lower is better) makes the
+gap explicit and quantifiable. Naive GD and Adam sit at deviation `0.9` for *every* budget
+tested — a step whose size is set by an unrepresentably tiny gradient stays unrepresentably
+tiny no matter how much budget is available to spend it on. PGD and MI-FGSM sit at deviation
+`0.9` (i.e. `f≈0`, no movement at all) until `B≈40-45`: their sign-based step moves **all 12
+coordinates by the same amount every iteration**, so under the shared L1 cap the perturbation
+ends up split evenly, `B/12` per coordinate, contributing `Δu ≈ (B/12)·Σc_j = 1.575·B` toward
+the needed `Δu≈58.9` — solving gives the observed `B≈37.4` threshold where they first start
+moving at all. A method spending its *entire* budget on only the 3 important coordinates would
+need just `Δu=(B/3)·6·3=6B ⇒ B≈9.8` — a **~3.8x** budget-efficiency gap, entirely explained by
+9 of PGD's 12 "budget slots" going to coordinates that barely matter. **Critically, even past
+that threshold, PGD and MI-FGSM's deviation never drops below the `eps_x` success line** —
+PGD plateaus at deviation `≈0.045` and MI-FGSM at `≈0.18`, both roughly 4.5x-18x *over* the
+tolerance, because their fixed-size sign step overshoots and oscillates around `y^t` forever
+rather than settling (the run never early-stops on the success condition, at any budget up to
+100) — the same "escapes but doesn't settle" limitation from Experiments 1-2, compounded here
+by the budget-dilution problem. Algorithm 1 (IG-guided) is the only method whose curve actually
+crosses *below* the success line, and does so cheaply (`B=10`) and stays there — its
+proportional-control step naturally shrinks as `e_x→0`, so once on target it stays on target
+rather than sailing past; the unweighted ablation crosses the line too, slightly later
+(`B=12`) and slightly above Algorithm 1's curve, but still successfully converges rather than
+merely getting close.
+
+## 12. Reproducing
 
 ```bash
 /home/xysong/.conda/envs/RL/bin/python sim/run_all.py
 ```
-Runs in about 3 minutes total (staircase toy ~5s, MNIST ~2.5 min including data
-download/training, attribution experiment ~2s). Figures land in `sim/figures/`; console output
-prints every experiment's numeric summary (success rates, median iterations, movement ratios).
+Runs in about 4 minutes total (staircase toy ~5s, attribution experiment ~2s, budget
+experiment ~90s, MNIST ~2.5 min including data download/training). Figures land in
+`sim/figures/`; console output prints every experiment's numeric summary (success rates,
+median iterations, movement ratios, budget sweep values).
 
-## 12. Environment notes
+## 13. Environment notes
 
 - The base conda env has no PyTorch; all experiments run under
   `/home/xysong/.conda/envs/RL/bin/python` (PyTorch 2.5.1 CPU, torchvision 0.20.1).
@@ -347,7 +434,7 @@ prints every experiment's numeric summary (success rates, median iterations, mov
 - MNIST is downloaded once via `torchvision.datasets.MNIST(download=True)` into
   `sim/data/` (mirrors to `ossci-datasets.s3.amazonaws.com` since `yann.lecun.com` 404s).
 
-## 13. Summary
+## 14. Summary
 
 The core claims in `IG_Guided_Target_Update_Formulation.pdf` hold up empirically:
 
@@ -369,3 +456,13 @@ The core claims in `IG_Guided_Target_Update_Formulation.pdf` hold up empirically
    coordinate-importance ranking exactly when the local gradient is least useful for that
    purpose, and using it to reweight updates measurably concentrates movement onto the
    coordinates that matter, beyond what gradient direction alone already provides.
+6. **Under a realistic scarce-movement budget, that concentration is what makes the difference
+   between success and failure**, not just a nice-to-have — sign-based methods provably spend
+   exactly the uniform 3/12 share on the important coordinates regardless of budget (by
+   construction), which quantifiably explains why they need ~3.8x the budget of a fully
+   concentrated method just to escape saturation at all — and even then, unlike Algorithm 1,
+   they never actually converge to `y^t` within tolerance at any budget tested, only oscillate
+   near it, since their sign-based step is a fixed size regardless of proximity to the target.
+   Magnitude-based methods (GD, Adam) that can't escape saturation fail identically regardless
+   of budget, since a step size derived from an unrepresentably tiny gradient stays
+   unrepresentable no matter how much of it there is to spend.

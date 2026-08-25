@@ -1,9 +1,10 @@
-"""Run all three experiments end to end and write every figure to sim/figures/."""
+"""Run all four experiments end to end and write every figure to sim/figures/."""
 import time
 
 import toy2d
 import ig_attribution_exp
 import mnist_exp
+import budget_exp
 
 
 def main():
@@ -18,6 +19,11 @@ def main():
     print("Experiment 3: IG attribution validation (6-D synthetic model)")
     print("=" * 70)
     ig_attribution_exp.run()
+
+    print("\n" + "=" * 70)
+    print("Experiment 4: budget-constrained attribution-aware escape")
+    print("=" * 70)
+    budget_exp.run()
 
     print("\n" + "=" * 70)
     print("Experiment 2: MNIST target-confidence attack")
