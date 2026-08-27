@@ -195,7 +195,7 @@ def _fig_concentration(x0, results):
     idx = np.arange(len(names))
     width = 0.35
     ax.bar(idx - width / 2, imp_move, width, label=f"{N_IMPORTANT} important coords", color="steelblue")
-    ax.bar(idx + width / 2, dec_move, width, label=f"{P - N_IMPORTANT} decoy coords", color="lightgray",
+    ax.bar(idx + width / 2, dec_move, width, label=f"{P - N_IMPORTANT} unimportant coords", color="lightgray",
            edgecolor="gray")
     ax.set_xticks(idx)
     ax.set_xticklabels([METHOD_LABELS[n] for n in names], rotation=30, ha="right", fontsize=8)

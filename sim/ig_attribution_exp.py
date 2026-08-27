@@ -30,7 +30,7 @@ os.makedirs(FIG_DIR, exist_ok=True)
 
 C = torch.tensor([5.0, 5.0, 0.1, 0.1, 0.1, 0.1])
 P = len(C)
-LABELS = [f"$x_{j+1}$" + (" (important)" if C[j] >= 1.0 else " (decoy)") for j in range(P)]
+LABELS = [f"$x_{j+1}$" + (" (important)" if C[j] >= 1.0 else " (unimportant)") for j in range(P)]
 
 
 def f(x):
@@ -115,7 +115,7 @@ def _fig_coordinate_movement(x0, hist_weighted, hist_unweighted):
 
     ratio_w = move_w[:2].sum() / move_w[2:].sum()
     ratio_u = move_u[:2].sum() / move_u[2:].sum()
-    ax.text(0.02, 0.95, f"important:decoy movement ratio\nIG-weighted = {ratio_w:.1f}x\nunweighted = {ratio_u:.1f}x",
+    ax.text(0.02, 0.95, f"important:unimportant movement ratio\nIG-weighted = {ratio_w:.1f}x\nunweighted = {ratio_u:.1f}x",
             transform=ax.transAxes, fontsize=9, va="top",
             bbox=dict(boxstyle="round", fc="white", alpha=0.8))
     print(f"[ig_attr] important:decoy movement ratio -- IG-weighted={ratio_w:.2f}x, unweighted={ratio_u:.2f}x")
